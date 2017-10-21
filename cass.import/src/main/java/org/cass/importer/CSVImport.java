@@ -145,7 +145,7 @@ public class CSVImport {
 	 * @method importCompetencies
 	 * @static
 	 */
-	public static void importCompetencies(Object file, final String serverUrl, final EcIdentity owner,
+	public static void importCompetencies(Object file, final EcRepository repo, final EcIdentity owner,
 	                                      final Integer nameIndex, final Integer descriptionIndex, final Integer scopeIndex, final Integer idIndex,
 	                                      final Object relations, final Integer sourceIndex, final Integer relationTypeIndex, final Integer destIndex,
 	                                      final Callback2<Array<EcCompetency>, Array<EcAlignment>> success, final Callback1<Object> failure,
@@ -157,6 +157,8 @@ public class CSVImport {
 			return;
 		}
 
+		Array<String> existing = JSCollections.$array();
+		
 		final Array<EcCompetency> competencies = JSCollections.$array();
 		Papa.parse(file, new PapaParseParams() {
 			{
@@ -193,14 +195,31 @@ public class CSVImport {
 							// If not unique and IdIndex set, copy GUID from CSV but prepend our serverUrl
 							if ((uniquify == JSGlobal.undefined || uniquify == null || uniquify == false) && idIndex != null && idIndex >= 0) {
 								competency.id = tabularData.$get(i).$get(idIndex);
-								transformId(tabularData.$get(i).$get(idIndex), competency, serverUrl);
+								transformId(tabularData.$get(i).$get(idIndex), competency, repo.selectedServer);
 								// otherwise (unique or no idIndex), generate new ID
 							} else {
-								competency.generateId(serverUrl);
+								competency.generateId(repo.selectedServer);
 							}
+							
+							EcRemoteLinkedData fromServer = EcRepository.getBlocking(competency.shortId());
+							if(fromServer != null && fromServer != JSGlobal.undefined && 
+									((owner == JSGlobal.undefined || owner == null) || fromServer.canEdit(owner.ppk.toPk()))) {
+								competency.copyFrom(fromServer);
+								existing.push(competency.shortId());
+							}else if(fromServer != null && fromServer != JSGlobal.undefined) {
+								String startId = competency.shortId();
+								int suffix = 2;
+								do {
+									competency.id = startId += suffix;
+									fromServer = EcRepository.getBlocking(competency.shortId());
+								}while(fromServer != null && fromServer != JSGlobal.undefined);
+							}
+							
+							
+							
 
 							// Set owner if we are given one
-							if (owner != JSGlobal.undefined && owner != null)
+							if (owner != JSGlobal.undefined && owner != null && !competency.hasOwner(owner.ppk.toPk()))
 								competency.addOwner(owner.ppk.toPk());
 
 							// Build a map from old competency identifiers (oldShortId, oldId and name) to the next competency ID
@@ -233,39 +252,62 @@ public class CSVImport {
 						}
 
 						// Save Competencies after list is built from CSV
-						saved = 0;
+						saved = existing.$length();
+						if(saved == competencies.$length()) {
+							saved++;
+							if (relations == null)
+								success.$invoke(competencies, new Array<EcAlignment>());
+							else
+								importRelations(repo, owner, relations, sourceIndex, relationTypeIndex,
+										destIndex, competencies, success, failure, incremental);
+						}
+						
 						for (int i = 0; i < competencies.$length(); i++) {
 							EcCompetency comp = competencies.$get(i);
-							comp.save(new Callback1<String>() {
-								public void $invoke(String results) {
+							
+							if(existing.indexOf(comp.shortId()) == -1) {
+								comp.save(new Callback1<String>() {
+									public void $invoke(String results) {
+										saved++;
+
+										if (saved % INCREMENTAL_STEP == 0) {
+											if (progressObject == null)
+												progressObject = new Object();
+											JSObjectAdapter.$put(progressObject, "competencies", saved);
+
+											incremental.$invoke(progressObject);
+										}
+
+										if (saved == competencies.$length()) {
+											saved++;
+											if (relations == null)
+												success.$invoke(competencies, new Array<EcAlignment>());
+											else
+												importRelations(repo, owner, relations, sourceIndex, relationTypeIndex,
+														destIndex, competencies, success, failure, incremental);
+										}
+									}
+
+								}, new Callback1<String>() {
+									public void $invoke(String results) {
+										failure.$invoke("Failed to save competency");
+
+										for (int j = 0; j < competencies.$length(); j++) {
+											competencies.$get(j)._delete(null, null, null);
+										}
+									}
+								});
+							}else {
+								if (saved == competencies.$length()) {
 									saved++;
-
-									if (saved % INCREMENTAL_STEP == 0) {
-										if (progressObject == null)
-											progressObject = new Object();
-										JSObjectAdapter.$put(progressObject, "competencies", saved);
-
-										incremental.$invoke(progressObject);
-									}
-
-									if (saved == competencies.$length()) {
-										if (relations == null)
-											success.$invoke(competencies, new Array<EcAlignment>());
-										else
-											importRelations(serverUrl, owner, relations, sourceIndex, relationTypeIndex,
-													destIndex, competencies, success, failure, incremental);
-									}
+									if (relations == null)
+										success.$invoke(competencies, new Array<EcAlignment>());
+									else
+										importRelations(repo, owner, relations, sourceIndex, relationTypeIndex,
+												destIndex, competencies, success, failure, incremental);
 								}
-
-							}, new Callback1<String>() {
-								public void $invoke(String results) {
-									failure.$invoke("Failed to save competency");
-
-									for (int j = 0; j < competencies.$length(); j++) {
-										competencies.$get(j)._delete(null, null, null);
-									}
-								}
-							});
+							}
+							
 						}
 					}
 				};
@@ -302,7 +344,7 @@ public class CSVImport {
 	 * @private
 	 * @static
 	 */
-	private static void importRelations(final String serverUrl, final EcIdentity owner, Object file,
+	private static void importRelations(final EcRepository repo, final EcIdentity owner, Object file,
 	                                    final Integer sourceIndex, final Integer relationTypeIndex, final Integer destIndex,
 	                                    final Array<EcCompetency> competencies, final Callback2<Array<EcCompetency>, Array<EcAlignment>> success,
 	                                    final Callback1<Object> failure, final Callback1<Object> incremental) {
@@ -323,6 +365,8 @@ public class CSVImport {
 			return;
 		}
 
+		
+		Array<String> existing = JSCollections.$array();
 		Papa.parse(file, new PapaParseParams() {
 			{
 				complete = new Callback1<Object>() {
@@ -330,9 +374,11 @@ public class CSVImport {
 					public void $invoke(Object results) {
 						Array<Array<String>> tabularData = (Array<Array<String>>) JSObjectAdapter.$get(results, "data");
 
+						
+						
 						for (int i = 1; i < tabularData.$length(); i++) {
 							EcAlignment alignment = new EcAlignment();
-							String sourceKey = tabularData.$get(i).$get(sourceIndex);
+							String sourceKey = tabularData.$get(i).$get(sourceIndex);							
 							String relationTypeKey = tabularData.$get(i).$get(relationTypeIndex);
 							String destKey = tabularData.$get(i).$get(destIndex);
 							if (JSObjectAdapter.$get(importCsvLookup, sourceKey) == null)
@@ -342,47 +388,72 @@ public class CSVImport {
 							alignment.source = (String) JSObjectAdapter.$get(importCsvLookup, sourceKey);
 							alignment.relationType = relationTypeKey;
 							alignment.target = (String) JSObjectAdapter.$get(importCsvLookup, destKey);
-							if (owner != null)
+							
+							String query = "source:\""+alignment.source+"\" AND target:\""+alignment.target+"'\"";
+							if (owner != null) {
 								alignment.addOwner(owner.ppk.toPk());
-							alignment.generateId(serverUrl);
+								query+=" AND @owner:\""+owner.ppk.toPk().toPem().replaceAll("\n", "")+"\"";
+							}
+							
+							
+							Array<EcRemoteLinkedData> fromServer = repo.searchBlocking(query);
+							if(fromServer == null || fromServer == JSGlobal.undefined || fromServer.$length() == 0) {
+								alignment.generateId(repo.selectedServer);
+							}else {
+								alignment.id = fromServer.$get(0).id;
+								existing.push(alignment.shortId());
+							}
 							relations.push(alignment);
 						}
 
-						saved = 0;
+						saved = existing.$length();
+						if(relations.$length() == 0) {
+							success.$invoke(competencies, relations);
+							return;
+						}
 						for (int i = 0; i < relations.$length(); i++) {
 							EcAlignment relation = relations.$get(i);
-							relation.save(new Callback1<String>() {
-								public void $invoke(String results) {
+							if(existing.indexOf(relation.shortId()) == -1) {
+								relation.save(new Callback1<String>() {
+									public void $invoke(String results) {
+										saved++;
+
+										if (saved % INCREMENTAL_STEP == 0) {
+											if (progressObject == null)
+												progressObject = new Object();
+
+											JSObjectAdapter.$put(progressObject, "relations", saved);
+
+											incremental.$invoke(progressObject);
+
+											incremental.$invoke(saved);
+										}
+
+										if (saved == relations.$length()) {
+											saved++;
+											success.$invoke(competencies, relations);
+										}
+									}
+
+								}, new Callback1<String>() {
+									public void $invoke(String results) {
+										failure.$invoke("Failed to save competency or relation");
+
+										for (int j = 0; j < competencies.$length(); j++) {
+											competencies.$get(j)._delete(null, null, null);
+										}
+										for (int j = 0; j < relations.$length(); j++) {
+											relations.$get(j)._delete(null, null);
+										}
+									}
+								});
+							}else {
+								if (saved == relations.$length()) {
 									saved++;
-
-									if (saved % INCREMENTAL_STEP == 0) {
-										if (progressObject == null)
-											progressObject = new Object();
-
-										JSObjectAdapter.$put(progressObject, "relations", saved);
-
-										incremental.$invoke(progressObject);
-
-										incremental.$invoke(saved);
-									}
-
-									if (saved == relations.$length()) {
-										success.$invoke(competencies, relations);
-									}
+									success.$invoke(competencies, relations);
 								}
-
-							}, new Callback1<String>() {
-								public void $invoke(String results) {
-									failure.$invoke("Failed to save competency or relation");
-
-									for (int j = 0; j < competencies.$length(); j++) {
-										competencies.$get(j)._delete(null, null, null);
-									}
-									for (int j = 0; j < relations.$length(); j++) {
-										relations.$get(j)._delete(null, null);
-									}
-								}
-							});
+							}
+							
 						}
 					}
 				};
@@ -588,4 +659,6 @@ public class CSVImport {
 			}
 		});
 	}
+	
+	
 }
