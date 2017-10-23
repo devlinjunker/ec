@@ -926,7 +926,7 @@ public class EcRepository {
 					if (cacheKey != null) {
 						JSObjectAdapter.$properties(fetching).$delete(cacheKey);
 					}
-					JSObjectAdapter.$put(cache, cacheKey, null);
+					JSObjectAdapter.$put(cache, cacheKey, JSCollections.$array());
 				}
 			});
 		} else {
@@ -948,7 +948,7 @@ public class EcRepository {
 					if (cacheKey != null) {
 						JSObjectAdapter.$properties(fetching).$delete(cacheKey);
 					}
-					JSObjectAdapter.$put(cache, cacheKey, null);
+					JSObjectAdapter.$put(cache, cacheKey, JSCollections.$array());
 				}
 			});
 		}
